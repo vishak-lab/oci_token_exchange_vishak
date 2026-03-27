@@ -1,7 +1,7 @@
 terraform {
   
   backend "s3" {
-    bucket = "TF-State-Token-Exchange"
+    bucket = "github-actions"
     region = "us-ashburn-1"
     key = "tf_demo_native_backend.tfstate"
     use_lockfile = true
