@@ -20,39 +20,39 @@ jobs:
       USER_OCID: ${{ secrets.USER_OCID }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       # -----------------------------
-      # 1. Generate ephemeral key
+      # 1. Generate RSA Key
       # -----------------------------
-      - name: Generate RSA key pair
+      - name: Generate RSA key
         run: |
           mkdir -p .oci
           openssl genrsa -out .oci/key.pem 2048
           chmod 600 .oci/key.pem
 
       # -----------------------------
-      # 2. Get GitHub OIDC token
+      # 2. Fetch GitHub OIDC token
       # -----------------------------
-      - name: Fetch GitHub OIDC token
+      - name: Get OIDC token
         run: |
           curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
           "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CLIENT_ID}" \
-          | jq -r '.value' > .oci/github.jwt
+          | jq -r '.value' | tr -d '\n' > .oci/github.jwt
 
       # -----------------------------
       # 3. Exchange → OCI UPST
       # -----------------------------
-      - name: Exchange token for OCI UPST
+      - name: Exchange for OCI token
         run: |
           AUTH=$(printf "%s:%s" "$CLIENT_ID:$CLIENT_SECRET" | base64 | tr -d '\n')
-          JWT=$(tr -d '\n' < .oci/github.jwt)
+          JWT=$(cat .oci/github.jwt)
 
           PUBKEY=$(openssl rsa -in .oci/key.pem -pubout \
             | awk 'NR>1 && !/END/ {printf "%s",$0}')
 
-          curl -sSL \
+          RESPONSE=$(curl -sSL \
             -H "Authorization: Basic $AUTH" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
@@ -60,16 +60,22 @@ jobs:
             --data-urlencode "subject_token=$JWT" \
             --data-urlencode "subject_token_type=jwt" \
             --data-urlencode "public_key=$PUBKEY" \
-            "$DOMAIN_BASE_URL/oauth2/v1/token" \
-            | jq -r '.token' > .oci/upst.token
+            "$DOMAIN_BASE_URL/oauth2/v1/token")
 
+          echo "$RESPONSE" > .oci/response.json
+
+          # ✅ CRITICAL FIX (no newline / no spaces)
+          jq -r '.token' .oci/response.json | tr -d '\r\n' > .oci/upst.token
+
+          # Validate token
           if [ ! -s .oci/upst.token ]; then
-            echo "❌ Failed to get UPST token"
+            echo "❌ Failed to extract token"
+            cat .oci/response.json
             exit 1
           fi
 
       # -----------------------------
-      # 4. Configure OCI CLI
+      # 4. Configure OCI
       # -----------------------------
       - name: Configure OCI
         run: |
@@ -93,7 +99,18 @@ jobs:
           EOF
 
       # -----------------------------
-      # 5. Terraform
+      # 5. Debug (optional but useful)
+      # -----------------------------
+      - name: Debug token format
+        run: |
+          echo "Token length:"
+          wc -c $HOME/.oci/token
+
+          echo "Check hidden chars:"
+          cat -A $HOME/.oci/token
+
+      # -----------------------------
+      # 6. Terraform
       # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
