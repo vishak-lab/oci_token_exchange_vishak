@@ -1,1 +1,2 @@
-instance_name = "tfvarsinstance"
+variable "instance_name"{
+}
