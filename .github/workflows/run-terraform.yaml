@@ -1,34 +1,27 @@
 name: Run Terraform with GitHub OIDC to OCI UPST
 
-# Trigger manually
 on:
   workflow_dispatch:
 
 permissions:
-  id-token: write       # Required to request OIDC token
+  id-token: write
   contents: read
 
 jobs:
   upst-terraform:
     runs-on: ubuntu-latest
+
     env:
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
       DOMAIN_BASE_URL: ${{ secrets.DOMAIN_BASE_URL }}
       OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
       OCI_REGION: ${{ secrets.OCI_REGION }}
-      USER_OCID: ${{ secrets.USER_OCID }}
 
     steps:
-      # -----------------------------
-      # 1. Checkout the repo
-      # -----------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # 2. Generate RSA key pair for UPST
-      # -----------------------------
       - name: Generate RSA Key Pair
         run: |
           mkdir -p .oci
@@ -39,37 +32,34 @@ jobs:
       - name: Convert Private Key to Single Line (No Headers)
         id: privkey
         run: |
-          awk '/BEGIN PRIVATE KEY/ {skip=1; next} /END PRIVATE KEY/ {skip=0; next} skip {gsub(/\r/, ""); printf "%s", $0;}' \
-            .oci/temp_private.pem > .oci/private_key.one_line.pem
+          awk '/BEGIN PRIVATE KEY/ {skip=1; next} /END PRIVATE KEY/ {skip=0; next} skip {gsub(/\r/, ""); printf "%s", $0;}' .oci/temp_private.pem > .oci/private_key.one_line.pem
 
       - name: Convert Public Key (No Headers)
         id: pubkey
         run: |
-          awk '/BEGIN PUBLIC KEY/ {skip=1; next} /END PUBLIC KEY/ {skip=0; next} skip {gsub(/\r/, ""); printf "%s", $0;}' \
-            .oci/temp_public.pem > .oci/public_key.one_line.pem
+          awk '/BEGIN PUBLIC KEY/ {skip=1; next} /END PUBLIC KEY/ {skip=0; next} skip {gsub(/\r/, ""); printf "%s", $0;}' .oci/temp_public.pem > .oci/public_key.one_line.pem
           PUBKEY=$(cat .oci/public_key.one_line.pem)
           echo "pubkey=$PUBKEY" >> $GITHUB_OUTPUT
 
-      # -----------------------------
-      # 3. Fetch GitHub OIDC Token
-      # -----------------------------
       - name: Fetch GitHub OIDC Token
         id: jwt
         run: |
           curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CLIENT_ID}" > .oci/id-token.json
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ secrets.CLIENT_ID }}" > id-token.json
 
-          JWT=$(jq -r '.value' .oci/id-token.json)
+          JWT=$(jq -r '.value' id-token.json)
           echo "$JWT" > .oci/id-token.jwt
           echo "jwt=$JWT" >> $GITHUB_OUTPUT
 
-      # -----------------------------
-      # 4. Exchange OIDC → OCI UPST
-      # -----------------------------
       - name: Exchange JWT for OCI UPST
         id: upst
+        continue-on-error: true
         run: |
-          AUTH_HEADER=$(printf "%s:%s" "${CLIENT_ID}:${CLIENT_SECRET}" | base64 -w0)
+          # AUTH_HEADER=$(printf "%s" "${CLIENT_ID}:${CLIENT_SECRET}" | base64 | tr -d '\n')
+          # SUBJECT_TOKEN=$(tr -d '\n' < .oci/id-token.jwt)
+          # PUBKEY=$(tr -d '\n' < .oci/public_key.one_line.pem)
+
+          AUTH_HEADER=$(printf "%s" "${{ secrets.CLIENT_ID }}:${{ secrets.CLIENT_SECRET }}" | base64 | tr -d '\n')
           SUBJECT_TOKEN=$(tr -d '\n' < .oci/id-token.jwt)
           PUBKEY=$(tr -d '\n' < .oci/public_key.one_line.pem)
 
@@ -81,87 +71,114 @@ jobs:
             --data-urlencode "subject_token=$SUBJECT_TOKEN" \
             --data-urlencode "subject_token_type=jwt" \
             --data-urlencode "public_key=$PUBKEY" \
-            "${DOMAIN_BASE_URL}/oauth2/v1/token")
+            "${{ secrets.DOMAIN_BASE_URL }}/oauth2/v1/token")
 
           echo "$RESPONSE" > .oci/upst-response.json
-          TOKEN=$(echo "$RESPONSE" | jq -r '.token' | tr -d '\r\n')
+          jq -r '.token' .oci/upst-response.json | tr -d '\n' > .oci/upst.token
 
-          if [ -z "$TOKEN" ]; then
-            echo "❌ Failed to extract UPST token"
+          if [ -s .oci/upst.token ]; then
+            echo "✅ UPST token was successfully extracted"
+            echo "success=true" >> $GITHUB_ENV
+          else
+            echo "‼️ Failed to extract UPST token"
             cat .oci/upst-response.json
-            exit 1
+            echo "success=false" >> $GITHUB_ENV
           fi
 
-          echo "$TOKEN" > .oci/upst.token
-          echo "UPST token saved successfully."
+          {
+            echo "==== GitHub OIDC Token ===="
+            cat .oci/id-token.jwt | fold -w 80
+            echo ""
+            echo "==== UPST Response ===="
+            cat .oci/upst-response.json | fold -w 80
+            echo ""
+            echo "==== Extracted UPST Token (if present) ===="
+            [ -s .oci/upst.token ] && cat .oci/upst.token | fold -w 80 || echo "(not available)"
+          } > .oci/token-debug.log
 
-      # -----------------------------
-      # 5. Configure OCI CLI for Terraform
-      # -----------------------------
-      - name: Configure OCI CLI
+      - name: Configure OCI CLI for Terraform
+        id: oci_config
+        # to check if variables can be used instead of writing to a file
+        if: env.success == 'true'
         run: |
           mkdir -p $HOME/.oci
-          cp .oci/temp_private.pem $HOME/.oci/key.pem
-          cp .oci/upst.token $HOME/.oci/token
-          chmod 600 $HOME/.oci/key.pem $HOME/.oci/token
+          cp .oci/temp_private.pem $HOME/.oci/temp_private.pem
+          cp .oci/upst.token $HOME/.oci/upst.token
+          chmod 600 $HOME/.oci/temp_private.pem $HOME/.oci/upst.token
 
-          # Create OCI config for Terraform (UPST)
-          cat > $HOME/.oci/config <<EOF
-[DEFAULT]
-user=$USER_OCID
-tenancy=$OCI_TENANCY
-region=$OCI_REGION
-key_file=$HOME/.oci/key.pem
-security_token_file=$HOME/.oci/token
-EOF
+          FINGERPRINT=$(openssl rsa -pubout -outform DER -in $HOME/.oci/temp_private.pem 2>/dev/null | openssl md5 -c | awk '{print $2}')
+          echo "FINGERPRINT=$FINGERPRINT" >> $GITHUB_OUTPUT
 
-      # -----------------------------
-      # 6. Upload Debug Artifacts (optional)
-      # -----------------------------
-      - name: Upload Debug Files
+          echo "[DEFAULT]" > $HOME/.oci/config
+          echo "user=${{ secrets.USER_OCID }}" >> $HOME/.oci/config
+          echo "region=${OCI_REGION}" >> $HOME/.oci/config
+          echo "tenancy=${OCI_TENANCY}" >> $HOME/.oci/config
+          echo "fingerprint=${FINGERPRINT}" >> $HOME/.oci/config
+          echo "key_file=$HOME/.oci/temp_private.pem" >> $HOME/.oci/config
+          echo "security_token_file=$HOME/.oci/upst.token" >> $HOME/.oci/config
+
+      - name: Upload Debug Files (Always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: oci-upst-debug
           path: |
-            .oci/id-token.jwt
+            .oci/token-debug.log
             .oci/upst-response.json
-            .oci/upst.token
-            .oci/temp_private.pem
-            .oci/temp_public.pem
+            .oci/id-token.jwt
             .oci/public_key.one_line.pem
+            .oci/temp_private.pem
+            .oci/curl-command.sh
+            .oci/upst.token
 
-      # -----------------------------
-      # 7. Setup Terraform
-      # -----------------------------
-      - name: Setup Terraform
+      #- name: Sleep for 30 seconds
+        #run: sleep 60s
+        #shell: bash
+        
+      - name: Set up Terraform
+        if: env.success == 'true'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.12.0
 
-      # -----------------------------
-      # 8. Terraform Init (local backend)
-      # -----------------------------
-      - name: Terraform Init
-        run: terraform init
+      - name: Terraform Init (VCN)
+        if: env.success == 'true'
+        # try to use env vars instead of .oci/config
+        #run: terraform init
+        run: terraform init -backend-config="access_key=${{ secrets.AWS_ACCESS_KEY_ID }}" -backend-config="secret_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
         working-directory: terraform/vcn
+        env:
+          AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
+          AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
 
-      # -----------------------------
-      # 9. Terraform Plan
-      # -----------------------------
-      - name: Terraform Plan
+      - name: Terraform Plan (VCN)
+        if: env.success == 'true'
         run: terraform plan
+        env:
+          #TF_VAR_tenancy_ocid: ${{ secrets.TF_VAR_TENANCY_OCID }}
+          #TF_VAR_user_ocid: ${{ secrets.TF_VAR_USER_OCID }}
+          #TF_VAR_fingerprint: ${{ secrets.TF_VAR_FINGERPRINT }}
+          #TF_VAR_private_key: ${{ secrets.TF_VAR_PRIVATE_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
+          AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
+          # Add other env vars or credentials as needed
         working-directory: terraform/vcn
 
-      # -----------------------------
-      # 10. Terraform Apply
-      # -----------------------------
-      - name: Terraform Apply
+      - name: Terraform Apply (VCN)
+        if: env.success == 'true'
         run: terraform apply -auto-approve
+        env:
+          #TF_VAR_tenancy_ocid: ${{ secrets.TF_VAR_TENANCY_OCID }}
+          #TF_VAR_user_ocid: ${{ secrets.TF_VAR_USER_OCID }}
+          #TF_VAR_fingerprint: ${{ secrets.TF_VAR_FINGERPRINT }}
+          #TF_VAR_private_key: ${{ secrets.TF_VAR_PRIVATE_KEY }}
+          AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
+          AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
+          # Add other env vars or credentials as needed
         working-directory: terraform/vcn
 
-      # -----------------------------
-      # 11. List OCI files for verification
-      # -----------------------------
-      - name: List OCI CLI Files
-        run: ls -l $HOME/.oci/
+      - name: list OCI
+        run: ls -l $HOME/.oci/*
+        
+      
+        
