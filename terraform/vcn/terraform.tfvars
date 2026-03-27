@@ -1,5 +1,5 @@
 region           = "us-ashburn-1"
 tenancy_ocid     = "ocid1.tenancy.oc1..aaaaaaaakxcj247rl2tyoc6bsmexmcnku6x6ze4p55lqfobmww2rnrjbksiq"
-compartment_ocid = "ocid1.compartment.oc1..aaaaaaaau7xlnyzjvmbh7pwjsuzp7equgxlozhz6y25bfiq3lwk6ee6pp3ua"
+compartment_ocid = "ocid1.compartment.oc1..aaaaaaaapjdzahspbgldg4d7vwtty47hywkaqu3372jj2cytb7chlaiqmgha"
 vcn_display_name = "Token_Exchange_vcn"
 vcn_cidr_block   = "10.20.0.0/16"
