@@ -1,4 +1,4 @@
-name: Create OCI Instance via Terraform
+name: Terraform OCI Instance (OIDC + UPST)
 
 on:
   workflow_dispatch:
@@ -20,29 +20,36 @@ jobs:
       USER_OCID: ${{ secrets.USER_OCID }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Generate temp key
-      - name: Generate RSA key
+      # -----------------------------
+      # 1. Generate ephemeral key
+      # -----------------------------
+      - name: Generate RSA key pair
         run: |
           mkdir -p .oci
           openssl genrsa -out .oci/key.pem 2048
+          chmod 600 .oci/key.pem
 
-      # Get GitHub OIDC token
-      - name: Fetch OIDC token
+      # -----------------------------
+      # 2. Get GitHub OIDC token
+      # -----------------------------
+      - name: Fetch GitHub OIDC token
         run: |
           curl -sSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
           "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CLIENT_ID}" \
-          | jq -r '.value' > .oci/token.jwt
+          | jq -r '.value' > .oci/github.jwt
 
-      # Exchange for OCI token (UPST)
-      - name: Exchange token
+      # -----------------------------
+      # 3. Exchange → OCI UPST
+      # -----------------------------
+      - name: Exchange token for OCI UPST
         run: |
-          AUTH=$(printf "%s:%s" "$CLIENT_ID" "$CLIENT_SECRET" | base64 | tr -d '\n')
-          JWT=$(cat .oci/token.jwt | tr -d '\n')
+          AUTH=$(printf "%s:%s" "$CLIENT_ID:$CLIENT_SECRET" | base64 | tr -d '\n')
+          JWT=$(tr -d '\n' < .oci/github.jwt)
 
-          PUB=$(openssl rsa -in .oci/key.pem -pubout \
+          PUBKEY=$(openssl rsa -in .oci/key.pem -pubout \
             | awk 'NR>1 && !/END/ {printf "%s",$0}')
 
           curl -sSL \
@@ -52,16 +59,25 @@ jobs:
             --data-urlencode "requested_token_type=urn:oci:token-type:oci-upst" \
             --data-urlencode "subject_token=$JWT" \
             --data-urlencode "subject_token_type=jwt" \
-            --data-urlencode "public_key=$PUB" \
+            --data-urlencode "public_key=$PUBKEY" \
             "$DOMAIN_BASE_URL/oauth2/v1/token" \
             | jq -r '.token' > .oci/upst.token
 
-      # Configure OCI CLI
+          if [ ! -s .oci/upst.token ]; then
+            echo "❌ Failed to get UPST token"
+            exit 1
+          fi
+
+      # -----------------------------
+      # 4. Configure OCI CLI
+      # -----------------------------
       - name: Configure OCI
         run: |
           mkdir -p $HOME/.oci
           cp .oci/key.pem $HOME/.oci/key.pem
           cp .oci/upst.token $HOME/.oci/token
+
+          chmod 600 $HOME/.oci/key.pem $HOME/.oci/token
 
           FP=$(openssl rsa -pubout -outform DER -in $HOME/.oci/key.pem \
             | openssl md5 -c | awk '{print $2}')
@@ -76,12 +92,20 @@ jobs:
           security_token_file=$HOME/.oci/token
           EOF
 
-      # Terraform
+      # -----------------------------
+      # 5. Terraform
+      # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
 
       - name: Terraform Init
         run: terraform init
+        working-directory: terraform
+
+      - name: Terraform Plan
+        run: terraform plan
         working-directory: terraform
 
       - name: Terraform Apply
