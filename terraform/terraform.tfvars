@@ -1,5 +1,1 @@
-compartment_id = "ocid1.compartment..."
-subnet_id      = "ocid1.subnet..."
-image_id       = "ocid1.image..."
-ad             = "YOUR-AD-1"
-ssh_public_key = "ssh-rsa AAAA..."
+instance_name = "tfvarsinstance"
