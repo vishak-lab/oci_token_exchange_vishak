@@ -143,17 +143,17 @@ jobs:
         with:
           terraform_version: 1.12.0
 
-      - name: Terraform Init ()
+      - name: Terraform Init (VCN)
         if: env.success == 'true'
         # try to use env vars instead of .oci/config
         #run: terraform init
         run: terraform init -backend-config="access_key=${{ secrets.AWS_ACCESS_KEY_ID }}" -backend-config="secret_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-        working-directory: terraform/
+        working-directory: terraform/vcn
         env:
           AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
           AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
 
-      - name: Terraform Plan ()
+      - name: Terraform Plan (VCN)
         if: env.success == 'true'
         run: terraform plan
         env:
@@ -164,9 +164,9 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
           AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
           # Add other env vars or credentials as needed
-        working-directory: terraform/
+        working-directory: terraform/vcn
 
-      - name: Terraform Apply ()
+      - name: Terraform Apply (VCN)
         if: env.success == 'true'
         run: terraform apply -auto-approve
         env:
@@ -177,7 +177,7 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: "when_required"
           AWS_REQUEST_CHECKSUM_VALIDATION: "when_required"
           # Add other env vars or credentials as needed
-        working-directory: terraform/
+        working-directory: terraform/vcn
 
       - name: list OCI
         run: ls -l $HOME/.oci/*
